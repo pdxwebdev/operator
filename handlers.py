@@ -31,6 +31,15 @@ from node_dashboard.settings import (
     target_from_config,
     tcp_open,
 )
+from plugins.operator.plugins import (
+    ESSENTIAL,
+    PluginInstallError,
+    catalog,
+    install_from_url,
+    list_installed,
+    release_status,
+    update_installed,
+)
 from plugins.operator.setup import (
     EDITABLE_CONFIG,
     apply_setup_gate,
@@ -55,6 +64,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 ASSETS = {
     "index.html": "text/html; charset=utf-8",
     "config.html": "text/html; charset=utf-8",
+    "plugins.html": "text/html; charset=utf-8",
     "setup.html": "text/html; charset=utf-8",
     "workflow.html": "text/html; charset=utf-8",
     "app.css": "text/css; charset=utf-8",
@@ -488,6 +498,69 @@ class OperatorIdentityHandler(OperatorHandler):
         )
 
 
+class OperatorSetupPluginsHandler(OperatorHandler):
+    async def get(self):
+        installed = set(list_installed())
+        self.write(
+            {
+                "ok": True,
+                "plugins": [
+                    dict(item, installed=item["name"] in installed)
+                    for item in catalog()
+                ],
+            }
+        )
+
+    async def post(self):
+        try:
+            payload = json.loads(self.request.body.decode("utf-8") or "{}")
+        except ValueError:
+            self.set_status(400)
+            self.write({"error": "Invalid JSON"})
+            return
+        known = {item["name"]: item["url"] for item in catalog()}
+        selected = payload.get("names") if isinstance(payload, dict) else None
+        if not isinstance(selected, list) or any(
+            not isinstance(name, str) or name not in known for name in selected
+        ):
+            self.set_status(400)
+            self.write({"error": "Choose plugins from the catalog."})
+            return
+        selected = list(dict.fromkeys(selected))
+        for name in known:
+            if name in ESSENTIAL and name not in selected:
+                selected.append(name)
+        disabled = [name for name in known if name not in selected and name not in ESSENTIAL]
+        loop = IOLoop.current()
+        installed = []
+        try:
+            for name in selected:
+                if name in list_installed():
+                    installed.append(name)
+                    continue
+                await loop.run_in_executor(None, install_from_url, known[name])
+                installed.append(name)
+            write_config_values(
+                self.config, {"disabled_plugins": disabled}, internal=False
+            )
+            self.config.disabled_plugins = disabled
+        except (PluginInstallError, ValueError) as exc:
+            self.set_status(400)
+            self.write({"error": str(exc), "installed": installed})
+            return
+        application = getattr(self.config, "application", None)
+        if application is not None and hasattr(application, "enter_maintenance"):
+            entered = not getattr(self.config, "maintenance", False)
+            if entered:
+                application.enter_maintenance()
+            try:
+                application.reload_http_routes()
+            finally:
+                if entered:
+                    await application.leave_maintenance()
+        self.write({"ok": True, "installed": installed, "disabled": disabled})
+
+
 class OperatorSeedHandler(OperatorHandler):
     async def get(self):
         step = read_onboarding(self.config)
@@ -508,7 +581,7 @@ class OperatorOnboardingHandler(OperatorHandler):
             self.write({"error": "Invalid JSON"})
             return
         step = (payload or {}).get("step") or ""
-        order = ["announce", "apps", "seed", "signin", "done"]
+        order = ["announce", "apps", "plugins", "seed", "signin", "done"]
         current = read_onboarding(self.config) or "announce"
         if step not in order or order.index(step) != order.index(current) + 1:
             self.set_status(409)
@@ -536,6 +609,89 @@ class OperatorOnboardingHandler(OperatorHandler):
                 return
         write_onboarding(self.config, step)
         self.write({"ok": True, "step": step})
+
+
+class OperatorPluginsPageHandler(OperatorHandler):
+    async def get(self):
+        send_asset(self, "plugins.html")
+
+
+class OperatorPluginsHandler(OperatorHandler):
+    async def get(self):
+        plugins = await IOLoop.current().run_in_executor(None, release_status)
+        self.write({"ok": True, "plugins": plugins})
+
+    async def post(self):
+        try:
+            body = json.loads(self.request.body.decode() or "{}")
+        except (ValueError, UnicodeDecodeError):
+            self.set_status(400)
+            self.write({"error": "Send a repository URL."})
+            return
+        if not isinstance(body, dict):
+            body = {}
+        if body.get("action") == "update":
+            await self._reload_plugin(update_installed, body.get("name"), "updated")
+            return
+        url = body.get("url")
+        await self._reload_plugin(install_from_url, url, "installed")
+
+    async def _reload_plugin(self, operation, argument, verb):
+        application = getattr(self.config, "application", None)
+        if application is None or not hasattr(application, "enter_maintenance"):
+            self.set_status(500)
+            self.write({"error": "Maintenance mode is not available."})
+            return
+        loop = IOLoop.current()
+        try:
+            installed = await loop.run_in_executor(None, operation, argument)
+        except PluginInstallError as exc:
+            self.set_status(400)
+            self.write({"error": str(exc)})
+            return
+        entered = False
+        reloaded = False
+        try:
+            if not getattr(self.config, "maintenance", False):
+                application.enter_maintenance()
+                entered = True
+            application.reload_http_routes()
+            reloaded = True
+        except Exception as exc:
+            self.set_status(500)
+            self.write(
+                {
+                    "error": "{} was {}, but routes were not reloaded: {}".format(
+                        installed["name"], verb, exc
+                    )
+                }
+            )
+        if entered:
+            try:
+                await application.leave_maintenance()
+            except Exception as exc:
+                self.set_status(500)
+                self.write(
+                    {
+                        "error": "{} was {}, but the node did not leave maintenance: {}".format(
+                            installed["name"], verb, exc
+                        )
+                    }
+                )
+                return
+        if not reloaded:
+            return
+        plugins = await loop.run_in_executor(None, release_status)
+        self.write(
+            {
+                "ok": True,
+                "name": installed["name"],
+                "plugins": plugins,
+                "message": "{} is {} and its routes are loaded.".format(
+                    installed["name"], verb
+                ),
+            }
+        )
 
 
 class OperatorConfigPageHandler(OperatorHandler):
@@ -683,12 +839,15 @@ HANDLERS = [
     (r"/operator/api/setup/identity", OperatorIdentityHandler),
     (r"/operator/api/setup/seed", OperatorSeedHandler),
     (r"/operator/api/setup/onboarding", OperatorOnboardingHandler),
+    (r"/operator/api/setup/plugins", OperatorSetupPluginsHandler),
     (r"/operator/api/setup", OperatorSetupApiHandler),
     (r"/operator/api/config", OperatorConfigHandler),
+    (r"/operator/api/plugins", OperatorPluginsHandler),
     (r"/operator/(app\.(?:css|js))", OperatorAssetHandler),
     (r"/operator/setup/workflow/?", OperatorWorkflowHandler),
     (r"/operator/setup/?", OperatorSetupHandler),
     (r"/operator/config/?", OperatorConfigPageHandler),
+    (r"/operator/plugins/?", OperatorPluginsPageHandler),
     (r"/operator/?", OperatorPageHandler),
 ]
 

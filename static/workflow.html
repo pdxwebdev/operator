@@ -41,6 +41,14 @@
           <p><button class="btn btn-primary" id="apps-done" type="button">I installed Yada Password</button></p>
         </div>
       </section>
+      <section class="Box" id="pane-plugins" hidden>
+        <div class="Box-header"><h2>Choose plugins</h2></div>
+        <div class="Box-body">
+          <p>These are the plugin repositories. Checked plugins are installed and enabled. Unchecked plugins stay disabled. Operator stays enabled.</p>
+          <div class="checks" id="plugin-choices"></div>
+          <p><button class="btn btn-primary" id="plugins-done" type="button">Install selected plugins</button></p>
+        </div>
+      </section>
       <section class="Box" id="pane-seed" hidden>
         <div class="Box-header"><h2>Save the vault</h2></div>
         <div class="Box-body">
@@ -77,7 +85,7 @@
       flash.className = ok ? "flash ok" : "flash error";
     }
     function pane(id) {
-      ["announce", "apps", "seed", "signin", "success"].forEach(function (name) {
+      ["announce", "apps", "plugins", "seed", "signin", "success"].forEach(function (name) {
         document.getElementById("pane-" + name).hidden = name !== id;
       });
     }
@@ -109,9 +117,58 @@
     function showApps() {
       pane("apps");
       document.getElementById("apps-done").onclick = function () {
-        postStep("seed").then(function (result) {
+        postStep("plugins").then(function (result) {
           if (!result.ok) { show(result.body.error || "Could not continue", false); return; }
-          showSeed();
+          showPlugins();
+        });
+      };
+    }
+    function showPlugins() {
+      pane("plugins");
+      var box = document.getElementById("plugin-choices");
+      var button = document.getElementById("plugins-done");
+      box.innerHTML = "";
+      fetch("/operator/api/setup/plugins", {credentials: "include"}).then(function (r) { return r.json(); }).then(function (body) {
+        (body.plugins || []).forEach(function (item) {
+          var label = document.createElement("label");
+          label.className = "check";
+          var input = document.createElement("input");
+          input.type = "checkbox";
+          input.value = item.name;
+          input.checked = !!item.essential;
+          input.disabled = !!item.essential;
+          label.appendChild(input);
+          label.appendChild(document.createTextNode(item.name + (item.essential ? " (required)" : "")));
+          box.appendChild(label);
+        });
+      });
+      button.onclick = function () {
+        var names = Array.prototype.map.call(box.querySelectorAll("input:checked"), function (input) {
+          return input.value;
+        });
+        button.disabled = true;
+        show("Installing selected plugins. Services pause while routes load.", true);
+        fetch("/operator/api/setup/plugins", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          credentials: "include",
+          body: JSON.stringify({names: names})
+        }).then(function (r) {
+          return r.json().then(function (body) { return {ok: r.ok, body: body}; });
+        }).then(function (result) {
+          if (!result.ok) {
+            button.disabled = false;
+            show(result.body.error || "Could not install plugins", false);
+            return;
+          }
+          return postStep("seed").then(function (advanced) {
+            if (!advanced.ok) { show(advanced.body.error || "Could not continue", false); button.disabled = false; return; }
+            show("", true);
+            showSeed();
+          });
+        }).catch(function () {
+          button.disabled = false;
+          show("Could not install plugins", false);
         });
       };
     }
@@ -219,6 +276,7 @@
     fetch("/operator/api/setup/identity", {credentials: "include"}).then(function (r) { return r.json(); }).then(function (body) {
       var step = body.step || "announce";
       if (step === "apps") showApps();
+      else if (step === "plugins") showPlugins();
       else if (step === "seed") showSeed();
       else if (step === "signin") showSignin();
       else pollIdentity();

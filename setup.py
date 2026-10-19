@@ -183,7 +183,7 @@ def missing_setup(config):
     return missing
 
 
-ONBOARDING_STEPS = ("announce", "apps", "seed", "signin", "done")
+ONBOARDING_STEPS = ("announce", "apps", "plugins", "seed", "signin", "done")
 
 
 def onboarding_path(config):
@@ -333,11 +333,16 @@ def write_config_values(config, values, internal=False):
                 value = [part.strip() for part in value.split(",") if part.strip()]
             if not isinstance(value, list):
                 raise ValueError("disabled_plugins must be a list")
-            known = available_plugins()
+            from plugins.operator.plugins import catalog
+
+            known = set(available_plugins())
+            known.update(item["name"] for item in catalog())
             unknown = [name for name in value if name not in known]
             if unknown:
                 raise ValueError("unknown plugins: {}".format(", ".join(unknown)))
-            value = [name for name in value if name != "operator"]
+            from plugins.operator.plugins import ESSENTIAL
+
+            value = [name for name in value if name not in ESSENTIAL]
         if key == "username":
             value = str(value or "").strip()
             if not value:

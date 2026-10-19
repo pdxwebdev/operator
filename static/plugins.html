@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Plugins · yadacoin</title>
+  <link rel="stylesheet" href="/operator/app.css">
+</head>
+<body>
+  <header class="Header">
+    <div class="Header-item">
+      <span class="Mark" aria-hidden="true">Y</span>
+      <a class="Header-title" href="/operator">
+        <strong>yadacoin</strong>
+        <span class="slash">/</span>
+        operator
+      </a>
+    </div>
+  </header>
+  <div class="UnderlineNav-wrap">
+    <nav class="UnderlineNav" aria-label="Operator">
+      <a class="UnderlineNav-item" href="/node-dashboard">Node dashboard</a>
+      <a class="UnderlineNav-item" href="/operator">Database</a>
+      <a class="UnderlineNav-item" href="/operator/config">Config</a>
+      <a class="UnderlineNav-item selected" href="/operator/plugins" aria-current="page">Plugins</a>
+    </nav>
+  </div>
+  <div class="page">
+    <main class="main">
+      <div class="page-head">
+        <h1>Plugins</h1>
+        <p>Install a repository, or update an installed plugin. Services pause briefly while routes reload.</p>
+      </div>
+      <div id="flash" class="flash" hidden></div>
+      <section class="Box">
+        <div class="Box-header"><h2>Install</h2></div>
+        <div class="Box-body">
+          <form class="form" id="plugin-form">
+            <label for="repo-url">Repository URL</label>
+            <input id="repo-url" name="url" autocomplete="off" spellcheck="false" placeholder="https://github.com/pdxwebdev/nodeapi.git">
+            <p class="hint">https or git@ only. The repo must contain handlers.py that sets HANDLERS.</p>
+            <div class="form-actions">
+              <button class="btn btn-primary" id="install-btn" type="submit">Install plugin</button>
+            </div>
+          </form>
+        </div>
+      </section>
+      <section class="Box">
+        <div class="Box-header"><h2>Installed</h2></div>
+        <div class="Box-body">
+          <p class="hint" id="plugin-empty">Loading plugins…</p>
+          <ul class="app-links" id="plugin-list" hidden></ul>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script>
+    (function () {
+      var flash = document.getElementById("flash");
+      var form = document.getElementById("plugin-form");
+      var button = document.getElementById("install-btn");
+      var list = document.getElementById("plugin-list");
+      var empty = document.getElementById("plugin-empty");
+
+      function show(message, ok) {
+        flash.hidden = false;
+        flash.textContent = message;
+        flash.className = ok ? "flash ok" : "flash error";
+      }
+
+      function render(names) {
+        list.innerHTML = "";
+        if (!names.length) {
+          empty.hidden = false;
+          empty.textContent = "No plugins in the install directory yet.";
+          list.hidden = true;
+          return;
+        }
+        empty.hidden = true;
+        list.hidden = false;
+        names.forEach(function (plugin) {
+          var name = typeof plugin === "string" ? plugin : plugin.name;
+          var item = document.createElement("li");
+          item.className = "plugin-row";
+          var label = document.createElement("span");
+          var current = plugin.current || "untagged";
+          var latest = plugin.latest || "no release";
+          label.textContent = name + "  " + current + " → " + latest;
+          var update = document.createElement("button");
+          update.className = "btn";
+          update.type = "button";
+          update.textContent = "Update";
+          update.disabled = !plugin.update;
+          update.addEventListener("click", function () { updatePlugin(name, update); });
+          item.appendChild(label);
+          item.appendChild(update);
+          list.appendChild(item);
+        });
+      }
+
+      function updatePlugin(name, update) {
+        update.disabled = true;
+        show("Updating " + name + ". Services will pause briefly.", true);
+        fetch("/operator/api/plugins", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "update", name: name })
+        }).then(function (response) {
+          return response.json().then(function (body) {
+            return { ok: response.ok, body: body };
+          });
+        }).then(function (result) {
+          if (!result.ok) {
+            show(result.body.error || "Update failed.", false);
+            return;
+          }
+          show(result.body.message, true);
+          render(result.body.plugins || []);
+        }).catch(function () {
+          show("Update failed.", false);
+        }).then(function () {
+          update.disabled = false;
+        });
+      }
+
+      fetch("/operator/api/plugins", { credentials: "same-origin" })
+        .then(function (response) { return response.json(); })
+        .then(function (body) { render(body.plugins || []); })
+        .catch(function () { empty.textContent = "Could not load plugins."; });
+
+      form.addEventListener("submit", function (event) {
+        event.preventDefault();
+        button.disabled = true;
+        show("Checking the repository and installing. Services will pause briefly.", true);
+        fetch("/operator/api/plugins", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: document.getElementById("repo-url").value })
+        }).then(function (response) {
+          return response.json().then(function (body) {
+            return { ok: response.ok, body: body };
+          });
+        }).then(function (result) {
+          if (!result.ok) {
+            show(result.body.error || "Install failed.", false);
+            return;
+          }
+          show(result.body.message, true);
+          render(result.body.plugins || []);
+        }).catch(function () {
+          show("Install failed.", false);
+        }).then(function () {
+          button.disabled = false;
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

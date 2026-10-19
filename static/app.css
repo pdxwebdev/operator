@@ -278,6 +278,7 @@ code {
 .about .k { display: block; color: var(--muted); font-weight: 600; }
 .about a { word-break: break-all; }
 .app-links { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.app-links .plugin-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .app-links a, .app-links .is-placeholder { font-size: 14px; }
 .app-links .is-placeholder { color: var(--muted); cursor: default; }
 .meter { height: 6px; background: var(--border); border-radius: 99px; overflow: hidden; margin: 12px 0; }
