@@ -12,12 +12,14 @@ Full license terms: see LICENSE.txt in this repository.
 """
 
 import asyncio
+import hmac
 import inspect
 import json
 import os
 import shutil
 import sys
 import threading
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from tornado.ioloop import IOLoop
 
@@ -259,13 +261,103 @@ def send_asset(handler, name):
 
 
 class OperatorHandler(BaseHandler):
+    def initialize(self):
+        self._redact_access_code()
+        super().initialize()
+
+    def _redact_access_code(self):
+        uri = self.request.uri or ""
+        if "code=" not in uri:
+            return
+        parts = urlsplit(uri)
+        kept = [
+            (key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            if key != "code"
+        ]
+        self.request.uri = urlunsplit(
+            ("", "", parts.path, urlencode(kept), parts.fragment)
+        )
+
+    def _presented_access_code(self):
+        code = self.get_query_argument("code", "") or ""
+        if not code:
+            code = self.request.headers.get("X-Operator-Code") or ""
+        if not code:
+            cookie = self.get_secure_cookie("operator_access")
+            if cookie:
+                try:
+                    code = cookie.decode()
+                except (AttributeError, UnicodeDecodeError):
+                    code = ""
+        return code
+
+    def _access_code_ok(self):
+        expected = getattr(self.config, "operator_access_code", "") or ""
+        presented = self._presented_access_code()
+        if not expected or not presented or len(presented) != len(expected):
+            return False
+        return hmac.compare_digest(presented, expected)
+
+    def _issue_access_cookie(self):
+        expected = getattr(self.config, "operator_access_code", "") or ""
+        if not expected:
+            return
+        cookie_kwargs = {
+            "httponly": True,
+            "secure": self._operator_cookie_secure(),
+        }
+        try:
+            self.set_secure_cookie(
+                "operator_access",
+                expected,
+                samesite="Lax",
+                **cookie_kwargs,
+            )
+        except TypeError:
+            self.set_secure_cookie("operator_access", expected, **cookie_kwargs)
+
+    def _deny_access_code(self):
+        self.set_header("Cache-Control", "no-store")
+        self.set_header("Referrer-Policy", "no-referrer")
+        path = self.request.path or ""
+        if path.startswith("/operator/api/"):
+            self.set_status(401)
+            self.render_as_json({"status": False, "error": "operator access code required"})
+            return
+        self.set_status(403)
+        self.finish("operator access code required")
+
+    def _strip_access_code(self):
+        if self.request.method != "GET":
+            return False
+        if not (self.get_query_argument("code", "") or ""):
+            return False
+        if (self.request.path or "").startswith("/operator/api/"):
+            return False
+        self.redirect(self.request.path)
+        return True
+
     async def prepare(self, exceptions=None):
         await super().prepare(exceptions=exceptions)
         if self._finished:
             return
         if self.request.method == "OPTIONS":
             return
+        self.set_header("Referrer-Policy", "no-referrer")
         path = self.request.path or ""
+        unlocked = await self.wallet_is_unlocked()
+        coded = self._access_code_ok()
+        open_setup = (
+            getattr(self.config, "setup_required", False) or onboarding_pending(self.config)
+        )
+        if open_setup and not unlocked and not coded:
+            self._deny_access_code()
+            return
+        if coded:
+            self._issue_access_cookie()
+            if self._strip_access_code():
+                return
         if getattr(self.config, "setup_required", False):
             if (
                 path.startswith("/operator/setup")
@@ -289,7 +381,7 @@ class OperatorHandler(BaseHandler):
                 return
             self.redirect("/operator/setup/workflow")
             return
-        if await self.wallet_is_unlocked():
+        if unlocked or coded:
             return
         path = self.request.path or ""
         if path.startswith("/operator/api/"):
