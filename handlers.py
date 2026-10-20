@@ -19,6 +19,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from tornado.ioloop import IOLoop
@@ -60,6 +61,7 @@ from yadacoin.enums.modes import MODES
 from yadacoin.http.base import BaseHandler
 
 SIGNIN_PURPOSE = "operator"
+ACCESS_CODE_TTL = 60
 
 STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "static"))
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -294,10 +296,23 @@ class OperatorHandler(BaseHandler):
 
     def _access_code_ok(self):
         expected = getattr(self.config, "operator_access_code", "") or ""
+        from_link = bool(
+            (self.get_query_argument("code", "") or "")
+            or (self.request.headers.get("X-Operator-Code") or "")
+        )
         presented = self._presented_access_code()
         if not expected or not presented or len(presented) != len(expected):
             return False
-        return hmac.compare_digest(presented, expected)
+        if not hmac.compare_digest(presented, expected):
+            return False
+        if not from_link:
+            return True
+        shown = getattr(self.config, "operator_access_code_shown_at", None)
+        try:
+            shown = float(shown)
+        except (TypeError, ValueError):
+            return False
+        return time.time() - shown <= ACCESS_CODE_TTL
 
     def _issue_access_cookie(self):
         expected = getattr(self.config, "operator_access_code", "") or ""
