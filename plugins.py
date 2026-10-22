@@ -218,7 +218,18 @@ def _is_newer(latest, current):
     return latest_key > current_key
 
 
+def _git_error(detail):
+    lines = [line.strip() for line in (detail or "").splitlines() if line.strip()]
+    if not lines:
+        return "command failed"
+    for line in lines:
+        if line.lower().startswith(("fatal:", "error:", "remote:")):
+            return line[:500]
+    return lines[0][:500]
+
+
 def _latest_tag(url):
+    url = _https_url(url)
     try:
         completed = subprocess.run(
             ["git", "ls-remote", "--tags", url],
@@ -231,7 +242,7 @@ def _latest_tag(url):
         raise PluginInstallError(str(exc)) from exc
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "could not read tags").strip()
-        raise PluginInstallError(detail.splitlines()[-1][:500])
+        raise PluginInstallError(_git_error(detail))
     found = {}
     for line in completed.stdout.splitlines():
         parts = line.split()
@@ -374,11 +385,12 @@ def _run(args, cwd=None, timeout=180):
         raise PluginInstallError(str(exc)) from exc
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "command failed").strip()
-        raise PluginInstallError(detail.splitlines()[-1][:500])
+        raise PluginInstallError(_git_error(detail))
 
 
 def install_from_url(raw, tag=None):
     url, name = parse_repo_url(raw)
+    url = _https_url(url)
     parent = tempfile.mkdtemp(prefix="yada-plugin-")
     checkout = os.path.join(parent, "src")
     try:
