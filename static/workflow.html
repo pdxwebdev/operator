@@ -66,6 +66,10 @@
           <label for="signinUsername">Yada username</label>
           <input id="signinUsername" type="text" autocomplete="username" spellcheck="false" readonly>
           <p><button class="btn btn-primary" id="signinBtn" type="button">Sign in</button></p>
+          <div class="Box" id="signin-code-box" hidden style="margin:12px 0;padding:12px;border:1px solid #444;border-radius:6px">
+            <div style="font-size:13px;opacity:.8">Enter this code in Yada Password to approve this browser</div>
+            <div id="signin-code" style="font-size:28px;letter-spacing:6px;font-weight:700">------</div>
+          </div>
           <p class="hint" id="signin-msg"></p>
         </div>
       </section>
@@ -215,6 +219,18 @@
     }
     var origin = window.location.origin.toLowerCase();
     var signinBtn = document.getElementById("signinBtn");
+    function clearActiveAuth() {
+      try { sessionStorage.removeItem("yadaActiveAuthSession"); } catch (e) {}
+      var box = document.getElementById("signin-code-box");
+      if (box) box.hidden = true;
+    }
+    function showSigninCode(code) {
+      var box = document.getElementById("signin-code-box");
+      var el = document.getElementById("signin-code");
+      if (!box || !el || !code) return;
+      el.textContent = String(code);
+      box.hidden = false;
+    }
     signinBtn.onclick = function () {
       var username = (document.getElementById("signinUsername").value || "").trim();
       var msg = document.getElementById("signin-msg");
@@ -228,6 +244,16 @@
       }).then(function (r) { return r.json().then(function (body) { return {ok: r.ok, body: body}; }); })
         .then(function (created) {
           if (!created.ok || !created.body.session_id) throw new Error(created.body.message || "could not start sign-in");
+          // The extension only approves a request the active tab started.
+          try {
+            sessionStorage.setItem("yadaActiveAuthSession", JSON.stringify({
+              session_id: created.body.session_id,
+              origin: origin,
+              at: Date.now(),
+              rp_token: created.body.rp_token || ""
+            }));
+          } catch (e) {}
+          showSigninCode(created.body.verification_code);
           return waitApproval(created.body);
         }).then(function (view) {
           if (!view.ok && !view.operator_session) {
@@ -250,9 +276,11 @@
         }).then(function () {
           return postStep("done");
         }).then(function (result) {
+          clearActiveAuth();
           if (!result.ok) throw new Error(result.body.error || "sign-in was not confirmed");
           showSuccess();
         }).catch(function (err) {
+          clearActiveAuth();
           signinBtn.disabled = false;
           msg.textContent = String(err.message || err);
         });
@@ -261,8 +289,10 @@
       var started = Date.now();
       function poll() {
         if (Date.now() - started > 180000) return Promise.reject(new Error("timed out waiting for approval"));
+        var headers = {"Accept": "application/json"};
+        if (created.rp_token) headers["X-Password-Auth-RP-Token"] = created.rp_token;
         return fetch("/password-rotation/auth-session/" + encodeURIComponent(created.session_id), {
-          headers: {"Accept": "application/json"},
+          headers: headers,
           credentials: "include"
         }).then(function (r) { return r.json(); }).then(function (view) {
           var st = view && view.session_status;
