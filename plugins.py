@@ -48,10 +48,6 @@ def install_dir():
     if env_dir:
         os.makedirs(env_dir, exist_ok=True)
         return os.path.abspath(env_dir)
-    docker_dir = "/plugins"
-    if os.path.isdir(docker_dir) or os.path.exists("/.dockerenv"):
-        os.makedirs(docker_dir, exist_ok=True)
-        return docker_dir
     repo_dir = os.path.join(REPO_ROOT, "plugins")
     os.makedirs(repo_dir, exist_ok=True)
     return repo_dir
